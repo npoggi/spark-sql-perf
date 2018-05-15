@@ -20,7 +20,7 @@ import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.language.implicitConversions
 
-import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.{DataFrame, Row}
 import org.apache.spark.sql.catalyst.analysis.UnresolvedRelation
 import org.apache.spark.sql.execution.SparkPlan
 
@@ -114,31 +114,57 @@ class Query(
         Seq.empty[BreakdownResult]
       }
 
+      def hashResult = dataFrame.selectExpr(s"sum(crc32(concat_ws(',', *)))").head()
+
       // The executionTime for the entire query includes the time of type conversion from catalyst
       // to scala.
       // Note: queryExecution.{logical, analyzed, optimizedPlan, executedPlan} has been already
       // lazily evaluated above, so below we will count only execution time.
-      var result: Option[Long] = None
+      var result: Option[Long] = None // hashed result
+      var queryResult: Option[String] = None // full result
+      var row: Row = Row(None)
       val executionTime = measureTimeMs {
         executionMode match {
           case ExecutionMode.CollectResults => dataFrame.collect()
+          case ExecutionMode.CollectSaveResults(location) =>
+            dataFrame.collect()
           case ExecutionMode.ForeachResults => dataFrame.foreach { row => Unit }
           case ExecutionMode.WriteParquet(location) =>
             dataFrame.write.parquet(s"$location/$name.parquet")
-          case ExecutionMode.HashResults =>
-            // SELECT SUM(CRC32(CONCAT_WS(", ", *))) FROM (benchmark query)
-            val row =
-              dataFrame
-                .selectExpr(s"sum(crc32(concat_ws(',', *)))")
-                .head()
-            result = if (row.isNullAt(0)) None else Some(row.getLong(0))
+          case ExecutionMode.HashResults => row = hashResult
         }
       }
+
+      // Also get the hash without affecting measured query times
+      executionMode match {
+        case ExecutionMode.CollectSaveResults(location) => {
+          row = hashResult
+          // Replace unsupported chars in column names " ,;{}()\n\t="
+          val cleanedFrame = dataFrame
+            .columns.foldLeft(dataFrame)((curr, n) => curr
+            .withColumnRenamed(
+              n, n.replaceAll("\\s|\\,|\\;|\\{|\\}|\\(|\\)|\n\t", "_")))
+            .coalesce(1)
+
+          queryResult = cleanedFrame.collect().map(_(0)).mkString("\n")
+          // CSV
+          cleanedFrame
+            .write.mode("overwrite").format("com.databricks.spark.csv")
+            .option("header", "true").save(s"$location/$name.csv")
+          // Parquet
+          cleanedFrame
+            .write.mode("overwrite").parquet(s"$location/$name.parquet")
+        }
+      }
+
+      result = if (row.isNullAt(0)) None else Some(row.getLong(0))
 
       val joinTypes = dataFrame.queryExecution.executedPlan.collect {
         case k if k.nodeName contains "Join" => k.nodeName
       }
 
+//println(s"### Result " + result + " EM " + executionMode.toString)
+dataFrame.show
       BenchmarkResult(
         name = name,
         mode = executionMode.toString,
@@ -151,7 +177,8 @@ class Query(
         executionTime = executionTime,
         result = result,
         queryExecution = dataFrame.queryExecution.toString,
-        breakDown = breakdownResults)
+        breakDown = breakdownResults,
+        queryResult = queryResult)
     } catch {
       case e: Exception =>
          BenchmarkResult(
