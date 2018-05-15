@@ -27,6 +27,11 @@ case object ExecutionMode {
     override def toString: String = "collect"
   }
 
+  /** Benchmark run by collecting queries results (e.g. dataframe.collect()) and save the results */
+  case class CollectSaveResults(location: String) extends ExecutionMode {
+    override def toString: String = "collectSave"
+  }
+
   /** Benchmark run by iterating through the queries results rows (e.g. rdd.foreach(row => Unit)) */
   case object ForeachResults extends ExecutionMode {
     override def toString: String = "foreach"
