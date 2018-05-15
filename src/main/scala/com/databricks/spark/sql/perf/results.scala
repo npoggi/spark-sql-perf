@@ -83,7 +83,8 @@ case class BenchmarkResult(
     breakDown: Seq[BreakdownResult] = Nil,
     queryExecution: Option[String] = None,
     failure: Option[Failure] = None,
-    mlResult: Option[MLResult] = None)
+    mlResult: Option[MLResult] = None,
+    queryResult: Option[String] = None)
 
 /**
  * The execution time of a subtree of the query plan tree of a specific query.
