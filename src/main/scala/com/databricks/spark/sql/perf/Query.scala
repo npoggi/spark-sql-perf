@@ -27,11 +27,11 @@ import org.apache.spark.sql.execution.SparkPlan
 
 /** Holds one benchmark query and its metadata. */
 class Query(
-    override val name: String,
-    buildDataFrame: => DataFrame,
-    val description: String = "",
-    val sqlText: Option[String] = None,
-    override val executionMode: ExecutionMode = ExecutionMode.ForeachResults)
+  override val name: String,
+  buildDataFrame: => DataFrame,
+  val description: String = "",
+  val sqlText: Option[String] = None,
+  override val executionMode: ExecutionMode = ExecutionMode.ForeachResults)
   extends Benchmarkable with Serializable {
 
   private implicit def toOption[A](a: A): Option[A] = Option(a)
@@ -63,9 +63,9 @@ class Query(
   def newDataFrame() = buildDataFrame
 
   protected override def doBenchmark(
-      includeBreakdown: Boolean,
-      description: String = "",
-      messages: ArrayBuffer[String]): BenchmarkResult = {
+    includeBreakdown: Boolean,
+    description: String = "",
+    messages: ArrayBuffer[String]): BenchmarkResult = {
     try {
       val dataFrame = buildDataFrame
       val queryExecution = dataFrame.queryExecution
@@ -114,57 +114,74 @@ class Query(
         Seq.empty[BreakdownResult]
       }
 
-      def hashResult = dataFrame.selectExpr(s"sum(crc32(concat_ws(',', *)))").head()
+      def hashResult(df: DataFrame) = df
+        .selectExpr(s"sum(crc32(concat_ws(',', *)))").head()
+
+      // Replace unsupported chars in column names " ,;{}()\n\t="
+      def cleanColumnNames(df: DataFrame) = df
+        .columns.foldLeft(df)((curr, n) => curr
+        .withColumnRenamed(
+          n, n.replaceAll("\\s|\\,|\\;|\\{|\\}|\\(|\\)|\n\t", "_")
+        ))
 
       // The executionTime for the entire query includes the time of type conversion from catalyst
       // to scala.
       // Note: queryExecution.{logical, analyzed, optimizedPlan, executedPlan} has been already
       // lazily evaluated above, so below we will count only execution time.
+      var row: Option[Row] = None
       var result: Option[Long] = None // hashed result
+      var queryRows: Option[Array[Row]] = None
       var queryResult: Option[String] = None // full result
-      var row: Row = Row(None)
+
       val executionTime = measureTimeMs {
         executionMode match {
           case ExecutionMode.CollectResults => dataFrame.collect()
-          case ExecutionMode.CollectSaveResults(location) =>
-            dataFrame.collect()
+          case ExecutionMode.CollectSaveResults =>
+            queryRows = Some(dataFrame.collect())
+          case  ExecutionMode.CollectWriteResults(format, location) =>
+            queryRows = Some(dataFrame.collect())
           case ExecutionMode.ForeachResults => dataFrame.foreach { row => Unit }
           case ExecutionMode.WriteParquet(location) =>
-            dataFrame.write.parquet(s"$location/$name.parquet")
-          case ExecutionMode.HashResults => row = hashResult
+            cleanColumnNames(dataFrame).write.parquet(s"$location/$name.parquet")
+          case ExecutionMode.HashResults => row = hashResult(dataFrame)
         }
       }
 
-      // Also get the hash without affecting measured query times
+      def toCSV(df: DataFrame): String = {
+        import sqlContext.implicits._
+        val csvFormat = org.apache.commons.csv
+          .CSVFormat.DEFAULT.withRecordSeparator(
+          System.getProperty("line.separator", "\n"))
+
+        val headerCSV =
+            csvFormat.format(df.columns.map(_.asInstanceOf[AnyRef]): _*)
+
+        val rowsCSV = df.map(row => {
+          csvFormat.format(row.toSeq.map(_.asInstanceOf[AnyRef]): _*)
+        }).collect.mkString("\n")
+
+        headerCSV + "\n" + rowsCSV
+      }
+
       executionMode match {
-        case ExecutionMode.CollectSaveResults(location) => {
-          row = hashResult
-          // Replace unsupported chars in column names " ,;{}()\n\t="
-          val cleanedFrame = dataFrame
-            .columns.foldLeft(dataFrame)((curr, n) => curr
-            .withColumnRenamed(
-              n, n.replaceAll("\\s|\\,|\\;|\\{|\\}|\\(|\\)|\n\t", "_")))
-            .coalesce(1)
-
-          queryResult = cleanedFrame.collect().map(_(0)).mkString("\n")
-          // CSV
-          cleanedFrame
-            .write.mode("overwrite").format("com.databricks.spark.csv")
-            .option("header", "true").save(s"$location/$name.csv")
-          // Parquet
-          cleanedFrame
-            .write.mode("overwrite").parquet(s"$location/$name.parquet")
+        case ExecutionMode.CollectSaveResults => {
+          row = hashResult(dataFrame)
         }
+        case ExecutionMode.CollectWriteResults(format, location) =>
+          cleanColumnNames(dataFrame)
+            .write.mode("overwrite")
+            .format(if (format == "csv") "com.databricks.spark.csv" else format)
+            .option("header", "true").save(s"$location/${name}.${format}")
+        case _ =>
       }
 
-      result = if (row.isNullAt(0)) None else Some(row.getLong(0))
+      // Store the numerical result (typically the hash)
+      result = if (row.isEmpty || row.get.isNullAt(0)) None else Some(row.get.getLong(0))
 
       val joinTypes = dataFrame.queryExecution.executedPlan.collect {
         case k if k.nodeName contains "Join" => k.nodeName
       }
 
-//println(s"### Result " + result + " EM " + executionMode.toString)
-dataFrame.show
       BenchmarkResult(
         name = name,
         mode = executionMode.toString,
@@ -181,10 +198,10 @@ dataFrame.show
         queryResult = queryResult)
     } catch {
       case e: Exception =>
-         BenchmarkResult(
-           name = name,
-           mode = executionMode.toString,
-           failure = Failure(e.getClass.getName, e.getMessage))
+        BenchmarkResult(
+          name = name,
+          mode = executionMode.toString,
+          failure = Failure(e.getClass.getName, e.getMessage))
     }
   }
 
