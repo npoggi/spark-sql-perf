@@ -15,18 +15,21 @@
  */
 
 package com.databricks.spark.sql.perf.tpch
+
 import scala.sys.process._
+import java.io.File
 
 import com.databricks.spark.sql.perf.{Benchmark, BlockingLineStream, DataGenerator, Table, Tables}
-import com.databricks.spark.sql.perf.ExecutionMode.CollectResults
-import org.apache.commons.io.IOUtils
+import com.databricks.spark.sql.perf.ExecutionMode._
+import org.apache.commons.io.{IOUtils, FileUtils}
 
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.SQLContext
 
 class DBGEN(dbgenDir: String, params: Seq[String]) extends DataGenerator {
   val dbgen = s"$dbgenDir/dbgen"
-  def generate(sparkContext: SparkContext,name: String, partitions: Int, scaleFactor: String) = {
+
+  def generate(sparkContext: SparkContext, name: String, partitions: Int, scaleFactor: String) = {
     val smallTables = Seq("nation", "region")
     val numPartitions = if (partitions > 1 && !smallTables.contains(name)) partitions else 1
     val generatedData = {
@@ -64,13 +67,14 @@ class DBGEN(dbgenDir: String, params: Seq[String]) extends DataGenerator {
 }
 
 class TPCHTables(
-    sqlContext: SQLContext,
-    dbgenDir: String,
-    scaleFactor: String,
-    useDoubleForDecimal: Boolean = false,
-    useStringForDate: Boolean = false,
-    generatorParams: Seq[String] = Nil)
-    extends Tables(sqlContext, scaleFactor, useDoubleForDecimal, useStringForDate) {
+  sqlContext: SQLContext,
+  dbgenDir: String,
+  scaleFactor: String,
+  useDoubleForDecimal: Boolean = false,
+  useStringForDate: Boolean = false,
+  generatorParams: Seq[String] = Nil)
+  extends Tables(sqlContext, scaleFactor, useDoubleForDecimal, useStringForDate) {
+
   import sqlContext.implicits._
 
   val dataGenerator = new DBGEN(dbgenDir, generatorParams)
@@ -174,4 +178,19 @@ class TPCH(@transient sqlContext: SQLContext)
       executionMode = CollectResults)
   }
   val queriesMap = queries.map(q => q.name.split("-").get(0) -> q).toMap
+}
+
+class TPCHTargetedPerf(@transient sqlContext: SQLContext)
+  extends Benchmark(sqlContext) {
+
+  val path = getClass.getResource("tpch-targeted-queries/queries")
+  val folder = new File(path.getPath)
+  val queries = folder
+    .listFiles
+    .toList.filter(_.getName.takeRight(4) == ".sql")
+    .foreach(file => {
+      val queryContent: String = FileUtils.readFileToString(file, "UTF-8")
+      Query(file.getName.split("_")(0), queryContent, description = file.getName,
+        executionMode = ForeachResults)
+  })
 }
